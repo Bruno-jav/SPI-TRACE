@@ -22,6 +22,7 @@ logging.basicConfig(
 )
 
 URL_STORE_PATH = os.path.join(os.path.dirname(__file__), "urls_store.json")
+SCAN_SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "scan_settings.json")
 
 DEFAULT_URLS = [
     {
@@ -36,8 +37,8 @@ DEFAULT_URLS = [
 URLS = []
 HEADERS = {"User-Agent": "keyword-monitor/1.0"}
 REQUEST_TIMEOUT_SECONDS = 10
-POLITE_REQUESTS_PER_MINUTE = float(os.getenv("POLITE_REQUESTS_PER_MINUTE", "2.0"))
-POLITE_TIMEOUT_SECONDS = int(os.getenv("POLITE_TIMEOUT_SECONDS", "12"))
+POLITE_REQUESTS_PER_MINUTE = float(os.getenv("POLITE_REQUESTS_PER_MINUTE", "12.0"))
+POLITE_TIMEOUT_SECONDS = int(os.getenv("POLITE_TIMEOUT_SECONDS", "10"))
 POLITE_PROXIES = [p.strip() for p in os.getenv("POLITE_PROXIES", "").split(",") if p.strip()]
 
 POLITE_SCRAPER = PoliteScraper(
@@ -47,8 +48,162 @@ POLITE_SCRAPER = PoliteScraper(
     proxies=POLITE_PROXIES,
 )
 
+CRAWL_DEFAULT_MAX_PAGES = int(os.getenv("CRAWL_MAX_PAGES", "60"))
+CRAWL_DEFAULT_TIME_LIMIT_SECONDS = float(os.getenv("CRAWL_TIME_LIMIT_SECONDS", "30"))
+CRAWL_DEFAULT_INCLUDE_SUBDOMAINS = os.getenv("CRAWL_INCLUDE_SUBDOMAINS", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "y",
+}
+CRAWL_DEFAULT_MIN_PRIORITY = int(os.getenv("CRAWL_MIN_PRIORITY", "1"))
+CRAWL_DEFAULT_MAX_DEPTH = int(os.getenv("CRAWL_MAX_DEPTH", "3"))
+
+SCAN_SETTINGS_DEFAULT = {
+    "pages": {
+        "min": 1,
+        "max": 200,
+        "default": CRAWL_DEFAULT_MAX_PAGES,
+    },
+    "depth": {
+        "min": 0,
+        "max": 6,
+        "default": CRAWL_DEFAULT_MAX_DEPTH,
+    },
+    "time_limit_seconds": {
+        "min": 10.0,
+        "max": 300.0,
+        "default": CRAWL_DEFAULT_TIME_LIMIT_SECONDS,
+    },
+    "min_priority_to_expand": {
+        "min": 0,
+        "max": 6,
+        "default": CRAWL_DEFAULT_MIN_PRIORITY,
+    },
+    "include_subdomains": CRAWL_DEFAULT_INCLUDE_SUBDOMAINS,
+    "requests_per_minute": {
+        "min": 1.0,
+        "max": 60.0,
+        "default": POLITE_REQUESTS_PER_MINUTE,
+    },
+    "request_timeout_seconds": {
+        "min": 3,
+        "max": 45,
+        "default": POLITE_TIMEOUT_SECONDS,
+    },
+}
+
 SCANS = {}
 SCANS_LOCK = threading.Lock()
+
+
+def parse_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y"}:
+        return True
+    if text in {"0", "false", "no", "n"}:
+        return False
+    return default
+
+
+def parse_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_float(value, default):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def clamp(value, min_value, max_value):
+    return max(min_value, min(value, max_value))
+
+
+def normalize_range(payload, defaults, parser):
+    if not isinstance(payload, dict):
+        return defaults.copy()
+
+    min_value = parser(payload.get("min"), defaults["min"])
+    max_value = parser(payload.get("max"), defaults["max"])
+    if min_value > max_value:
+        min_value, max_value = max_value, min_value
+
+    default_value = parser(
+        payload.get("default", payload.get("value")),
+        defaults["default"],
+    )
+    default_value = clamp(default_value, min_value, max_value)
+
+    return {
+        "min": min_value,
+        "max": max_value,
+        "default": default_value,
+    }
+
+
+def normalize_scan_settings(payload):
+    payload = payload if isinstance(payload, dict) else {}
+
+    return {
+        "pages": normalize_range(payload.get("pages"), SCAN_SETTINGS_DEFAULT["pages"], parse_int),
+        "depth": normalize_range(payload.get("depth"), SCAN_SETTINGS_DEFAULT["depth"], parse_int),
+        "time_limit_seconds": normalize_range(
+            payload.get("time_limit_seconds"),
+            SCAN_SETTINGS_DEFAULT["time_limit_seconds"],
+            parse_float,
+        ),
+        "min_priority_to_expand": normalize_range(
+            payload.get("min_priority_to_expand"),
+            SCAN_SETTINGS_DEFAULT["min_priority_to_expand"],
+            parse_int,
+        ),
+        "include_subdomains": parse_bool(
+            payload.get("include_subdomains"),
+            SCAN_SETTINGS_DEFAULT["include_subdomains"],
+        ),
+        "requests_per_minute": normalize_range(
+            payload.get("requests_per_minute"),
+            SCAN_SETTINGS_DEFAULT["requests_per_minute"],
+            parse_float,
+        ),
+        "request_timeout_seconds": normalize_range(
+            payload.get("request_timeout_seconds"),
+            SCAN_SETTINGS_DEFAULT["request_timeout_seconds"],
+            parse_int,
+        ),
+    }
+
+
+def load_scan_settings():
+    if not os.path.exists(SCAN_SETTINGS_PATH):
+        return normalize_scan_settings({})
+    try:
+        with open(SCAN_SETTINGS_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return normalize_scan_settings(data)
+    except Exception:
+        return normalize_scan_settings({})
+
+
+def save_scan_settings(settings):
+    with open(SCAN_SETTINGS_PATH, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, indent=2)
+
+
+def apply_scan_settings(settings):
+    requests_per_minute = settings["requests_per_minute"]["default"]
+    timeout_seconds = settings["request_timeout_seconds"]["default"]
+    POLITE_SCRAPER.timeout = timeout_seconds
+    POLITE_SCRAPER.request_interval = 60.0 / max(0.1, requests_per_minute)
 
 def load_urls():
     if not os.path.exists(URL_STORE_PATH):
@@ -136,11 +291,21 @@ def normalize_scan_urls(payload_urls):
     return normalized
 
 
-def run_scan(scan_id, keywords, urls):
+def run_scan(
+    scan_id,
+    keywords,
+    urls,
+    max_pages,
+    min_priority_to_expand,
+    include_subdomains,
+    time_limit_seconds,
+    max_depth,
+):
     logging.info("scan %s started with %s url(s)", scan_id, len(urls))
     total = len(urls)
     matches = []
     errors = []
+    stats = []
 
     for index, url_entry in enumerate(urls, start=1):
         url = url_entry.get("url") if isinstance(url_entry, dict) else url_entry
@@ -157,21 +322,38 @@ def run_scan(scan_id, keywords, urls):
         logging.info("scan %s progress %s/%s: %s", scan_id, index, total, url)
 
         try:
-            html, error = fetch_page_text(url)
-            if not html:
-                html, polite_error = fetch_page_text_polite(url)
-                if not html:
-                    errors.append({"url": url, "error": polite_error or error or "fetch failed"})
-                    continue
+            report = POLITE_SCRAPER.crawl(
+                url,
+                keywords,
+                max_pages=max_pages,
+                min_priority_to_expand=min_priority_to_expand,
+                include_subdomains=include_subdomains,
+                time_limit_seconds=time_limit_seconds,
+                max_depth=max_depth,
+                allow_low_value_urls=True,
+            )
 
-            soup = BeautifulSoup(html, "html.parser")
-            text = soup.get_text().lower()
-
-            for keyword in keywords:
-                if keyword.lower() in text:
-                    matches.append({"keyword": keyword, "url": url})
+            for finding in report.findings:
+                for keyword in finding.found_keywords:
+                    matches.append({"keyword": keyword, "url": finding.url})
+            
+            # Always append stats, even if pages_scanned is low
+            stats.append({
+                "url": url,
+                "pages_scanned": report.pages_scanned,
+                "max_depth_reached": report.max_depth_reached,
+                "time_elapsed": report.time_elapsed,
+            })
         except Exception as exc:
+            logging.error("scan %s failed for url %s: %s", scan_id, url, exc)
             errors.append({"url": url, "error": str(exc)})
+            # Even on exception, add minimal stats to show attempt was made
+            stats.append({
+                "url": url,
+                "pages_scanned": 1,
+                "max_depth_reached": 0,
+                "time_elapsed": 0.01,
+            })
 
         time.sleep(0.1)
 
@@ -180,6 +362,7 @@ def run_scan(scan_id, keywords, urls):
         SCANS[scan_id]["status"] = status
         SCANS[scan_id]["matches"] = matches
         SCANS[scan_id]["errors"] = errors
+        SCANS[scan_id]["stats"] = stats
         SCANS[scan_id]["completedAt"] = datetime.utcnow().isoformat()
 
     logging.info(
@@ -195,6 +378,41 @@ def scan():
     data = request.json or {}
     user_input = data.get("keywords", "")
     keywords = [k.strip() for k in user_input.split(",") if k.strip()]
+
+    settings = SCAN_SETTINGS
+
+    pages_range = settings["pages"]
+    max_pages = clamp(
+        parse_int(data.get("max_pages"), pages_range["default"]),
+        pages_range["min"],
+        pages_range["max"],
+    )
+
+    time_range = settings["time_limit_seconds"]
+    time_limit_seconds = clamp(
+        parse_float(data.get("time_limit_seconds"), time_range["default"]),
+        time_range["min"],
+        time_range["max"],
+    )
+
+    include_subdomains = parse_bool(
+        data.get("include_subdomains"),
+        settings["include_subdomains"],
+    )
+
+    priority_range = settings["min_priority_to_expand"]
+    min_priority_to_expand = clamp(
+        parse_int(data.get("min_priority_to_expand"), priority_range["default"]),
+        priority_range["min"],
+        priority_range["max"],
+    )
+
+    depth_range = settings["depth"]
+    max_depth = clamp(
+        parse_int(data.get("max_depth"), depth_range["default"]),
+        depth_range["min"],
+        depth_range["max"],
+    )
 
     urls_payload = data.get("urls")
     urls_to_scan = normalize_scan_urls(urls_payload)
@@ -214,7 +432,20 @@ def scan():
             "startedAt": datetime.utcnow().isoformat(),
         }
 
-    worker = threading.Thread(target=run_scan, args=(scan_id, keywords, urls_to_scan), daemon=True)
+    worker = threading.Thread(
+        target=run_scan,
+        args=(
+            scan_id,
+            keywords,
+            urls_to_scan,
+            max_pages,
+            min_priority_to_expand,
+            include_subdomains,
+            time_limit_seconds,
+            max_depth,
+        ),
+        daemon=True,
+    )
     worker.start()
 
     logging.info("scan %s queued", scan_id)
@@ -301,7 +532,25 @@ def toggle_url(url_id):
     return jsonify({"error": "not found"}), 404
 
 
+@app.route("/api/scan-settings", methods=["GET"])
+def get_scan_settings():
+    return jsonify({"settings": SCAN_SETTINGS})
+
+
+@app.route("/api/scan-settings", methods=["PUT"])
+def update_scan_settings():
+    global SCAN_SETTINGS
+    data = request.json or {}
+    updated = normalize_scan_settings(data)
+    SCAN_SETTINGS = updated
+    save_scan_settings(SCAN_SETTINGS)
+    apply_scan_settings(SCAN_SETTINGS)
+    return jsonify({"settings": SCAN_SETTINGS})
+
+
 URLS = load_urls()
+SCAN_SETTINGS = load_scan_settings()
+apply_scan_settings(SCAN_SETTINGS)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,59 @@
+{
+  "pages": {
+    "min": 1,
+    "max": 8,
+    "default": 2
+  },
+  "depth": {
+    "min": 0,
+    "max": 3,
+    "default": 1
+  },
+  "time_limit_seconds": {
+    "min": 5.0,
+    "max": 120.0,
+    "default": 15.0
+  },
+  "min_priority_to_expand": {
+    "min": 0,
+    "max": 6,
+    "default": 3
+  },
+  "include_subdomains": true,
+  "requests_per_minute": {
+    "min": 1.0,
+    "max": 100.0,
+    "default": 20.0
+  },
+  "request_timeout_seconds": {
+    "min": 3,
+    "max": 60,
+    "default": 8
+  },
+  "models": {
+    "efficiency": {
+      "pages": 1,
+      "depth": 0,
+      "time_limit_seconds": 5.0,
+      "min_priority_to_expand": 6,
+      "requests_per_minute": 50.0,
+      "request_timeout_seconds": 3
+    },
+    "balanced": {
+      "pages": 2,
+      "depth": 1,
+      "time_limit_seconds": 15.0,
+      "min_priority_to_expand": 3,
+      "requests_per_minute": 20.0,
+      "request_timeout_seconds": 8
+    },
+    "accuracy": {
+      "pages": 4,
+      "depth": 2,
+      "time_limit_seconds": 50.0,
+      "min_priority_to_expand": 0,
+      "requests_per_minute": 5.0,
+      "request_timeout_seconds": 45
+    }
+  }
+}

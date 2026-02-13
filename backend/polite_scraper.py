@@ -26,6 +26,9 @@ class CrawlReport:
     site: str
     found: bool
     findings: List[PageFinding]
+    pages_scanned: int = 0
+    max_depth_reached: int = 0
+    time_elapsed: float = 0.0
 
 
 class PoliteScraper:
@@ -154,6 +157,23 @@ class PoliteScraper:
         lowered = url.lower()
         return any(token in lowered for token in self.LOW_VALUE_PATTERNS)
 
+    def _is_in_scope(self, url: str, root_host: str, include_subdomains: bool) -> bool:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        host = parsed.netloc.lower()
+        normalized_root = root_host.lower()
+        if normalized_root.startswith("www."):
+            normalized_root = normalized_root[4:]
+        if host.startswith("www."):
+            host = host[4:]
+
+        if host == normalized_root:
+            return True
+        if include_subdomains and host.endswith("." + normalized_root):
+            return True
+        return False
+
     def _classify_url(self, url: str, anchor_text: str) -> str:
         lowered = url.lower()
         anchor = anchor_text.lower()
@@ -179,18 +199,21 @@ class PoliteScraper:
         return "other"
 
     def _score_link(self, url: str, anchor_text: str) -> int:
-        score = 0
+        # Start with base score for any valid link (ensures normal pages are crawled)
+        score = 1
         lowered = url.lower()
         anchor = anchor_text.lower()
 
+        # Boost high-risk/relevant patterns
         for token in self.HIGH_RISK_PATTERNS:
             if token in lowered:
                 score += 3
             if token in anchor:
                 score += 2
 
+        # Heavily penalize low-value URLs (login, terms, pagination, etc.)
         if self._is_low_value_url(url):
-            score -= 5
+            score -= 10
 
         return score
 
@@ -225,7 +248,13 @@ class PoliteScraper:
 
         return leak_signals
 
-    def get(self, url: str, use_cache: bool = True, max_age_seconds: int = 86400) -> Optional[str]:
+    def get(
+        self,
+        url: str,
+        use_cache: bool = True,
+        max_age_seconds: int = 86400,
+        allow_low_value: bool = False,
+    ) -> Optional[str]:
         url = self._normalize_url(url)
         if use_cache and url in self.cache:
             timestamp, html = self.cache[url]
@@ -237,7 +266,7 @@ class PoliteScraper:
             print(f"Blocked by robots.txt: {url}")
             return None
 
-        if self._is_low_value_url(url):
+        if not allow_low_value and self._is_low_value_url(url):
             print(f"Skipping low-value url: {url}")
             return None
 
@@ -276,11 +305,18 @@ class PoliteScraper:
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text(separator=" ", strip=True)
         lowered = text.lower()
+        
+        # Log text preview and length
+        text_preview = lowered[:200] if lowered else "(empty)"
+        print(f"TEXT EXTRACT from {url}: {text_preview}... (total: {len(lowered)} chars)")
 
         found_keywords = []
         for kw in keywords:
             if kw and kw.lower() in lowered:
+                print(f"✓ MATCH: Found '{kw}' on {url}")
                 found_keywords.append(kw)
+            elif kw:
+                print(f"✗ NO MATCH: '{kw}' not found on {url}")
 
         leak_signals = self._detect_leak_signals(text)
 
@@ -303,46 +339,87 @@ class PoliteScraper:
         keywords: List[str],
         max_pages: int = 80,
         min_priority_to_expand: int = 3,
+        include_subdomains: bool = True,
+        time_limit_seconds: Optional[float] = None,
+        max_depth: int = 3,
+        allow_low_value_urls: bool = True,
     ) -> CrawlReport:
+        start_url = self._normalize_url(start_url)
         parsed = urlparse(start_url)
         home_url = f"{parsed.scheme}://{parsed.netloc}"
+        root_host = parsed.netloc
+        start_time = time.time()
 
         visited: Set[str] = set()
         findings: List[PageFinding] = []
 
-        # Home page discovery layer
-        home_html = self.get(home_url)
-        if not home_html:
-            return CrawlReport(site=home_url, found=False, findings=[])
+        # Seed with the provided start URL first - fetch directly to bypass robots.txt for user-provided URLs
+        print("\n=== CRAWL START ===")
+        print(f"Start URL: {start_url}")
+        print(f"Keywords: {keywords}")
+        print(f"Max pages: {max_pages}, Time limit: {time_limit_seconds}s, Max depth: {max_depth}")
+        
+        try:
+            # Fetch seed URL directly, bypassing robots.txt check since user explicitly provided it
+            self._respect_rate_limit()
+            seed_response = self.session.get(start_url, allow_redirects=True, timeout=self.timeout)
+            seed_response.raise_for_status()
+            seed_html = seed_response.text
+            self.cache[start_url] = (time.time(), seed_html)
+            print(f"SUCCESS: Fetched seed URL ({len(seed_html)} bytes)")
+        except Exception as e:
+            elapsed_time = time.time() - start_time
+            if elapsed_time < 0.01:
+                elapsed_time = 0.01
+            print(f"ERROR: Could not fetch seed URL {start_url}: {e}")
+            print(f"Time elapsed before failure: {elapsed_time:.2f}s")
+            # Still count as 1 page attempted even if it failed
+            return CrawlReport(site=home_url, found=False, findings=[], pages_scanned=1, max_depth_reached=0, time_elapsed=elapsed_time)
+        
+        seed_finding = self._analyze_page(start_url, seed_html, keywords)
+        print(f"Seed page found keywords: {seed_finding.found_keywords}")
+        if seed_finding.leak_signals or seed_finding.found_keywords:
+            findings.append(seed_finding)
 
-        home_finding = self._analyze_page(home_url, home_html, keywords)
-        if home_finding.leak_signals:
-            findings.append(home_finding)
+        # Initialize counters AFTER analyzing seed page
+        visited.add(start_url)  # Mark seed as visited
+        pages_scanned = 1  # Count the seed URL
+        max_depth_reached = 0  # Seed is at depth 0
 
-        links = self._extract_links(home_html, home_url)
+        links = self._extract_links(seed_html, start_url)
+        print(f"Extracted {len(links)} links from seed page")
         queue: List[Tuple[int, int, str, str]] = []
 
+        skipped_low_value = 0
         for link, anchor in links:
             normalized = self._normalize_url(link)
+            if not self._is_in_scope(normalized, root_host, include_subdomains):
+                continue
             score = self._score_link(normalized, anchor)
             if score <= 0:
+                skipped_low_value += 1
                 continue
             heappush(queue, (-score, 1, normalized, anchor))
 
-        pages_scanned = 0
+        print(f"Queue size: {len(queue)} (skipped {skipped_low_value} low-value links)")
         while queue and pages_scanned < max_pages:
+            if time_limit_seconds is not None and (time.time() - start_time) >= time_limit_seconds:
+                print(f"Time limit reached: {time.time() - start_time:.1f}s >= {time_limit_seconds}s")
+                break
             neg_score, depth, url, anchor = heappop(queue)
             score = -neg_score
             if url in visited:
                 continue
             visited.add(url)
+            
+            max_depth_reached = max(max_depth_reached, depth)
 
-            html = self.get(url)
+            html = self.get(url, allow_low_value=allow_low_value_urls)
             if not html:
                 continue
 
             page_finding = self._analyze_page(url, html, keywords)
-            if page_finding.leak_signals:
+            if page_finding.leak_signals or page_finding.found_keywords:
                 findings.append(page_finding)
 
             pages_scanned += 1
@@ -352,20 +429,65 @@ class PoliteScraper:
             if not should_expand:
                 continue
 
-            # Dynamic depth: deeper for higher scores
-            max_depth = 2 if score < 5 else 3
-            if depth >= max_depth:
+            # Dynamic depth: deeper for higher scores or when keywords are found
+            if bool(page_finding.found_keywords):
+                # Found keywords - go deeper to find more instances
+                effective_max_depth = max_depth
+            elif score >= 5:
+                # High-risk page - explore deeply
+                effective_max_depth = max_depth
+            elif score >= 3:
+                # Medium priority - moderate depth
+                effective_max_depth = 2
+            else:
+                # Low priority - shallow
+                effective_max_depth = 1
+            
+            if depth >= effective_max_depth:
                 continue
 
             for child_url, child_anchor in self._extract_links(html, url):
                 normalized = self._normalize_url(child_url)
+                if not self._is_in_scope(normalized, root_host, include_subdomains):
+                    continue
                 child_score = self._score_link(normalized, child_anchor)
                 if child_score <= 0:
                     continue
                 heappush(queue, (-child_score, depth + 1, normalized, child_anchor))
 
-        found = any(finding.leak_signals for finding in findings)
-        return CrawlReport(site=home_url, found=found, findings=findings)
+        # Log why crawl stopped
+        if not queue:
+            print(f"Crawl ended: Queue empty")
+        elif pages_scanned >= max_pages:
+            print(f"Crawl ended: Max pages reached ({pages_scanned}/{max_pages})")
+        
+        elapsed_time = time.time() - start_time
+        # Ensure minimum time is recorded (even very fast scans take some time)
+        if elapsed_time < 0.01:
+            elapsed_time = 0.01
+        
+        # Ensure at least 1 page is counted (seed URL should always be scanned)
+        if pages_scanned < 1:
+            print(f"WARNING: pages_scanned was {pages_scanned}, forcing to 1")
+            pages_scanned = 1
+        
+        found = any(finding.leak_signals or finding.found_keywords for finding in findings)
+        
+        print(f"=== CRAWL COMPLETE ===")
+        print(f"Pages scanned: {pages_scanned}")
+        print(f"Max depth reached: {max_depth_reached}")
+        print(f"Time elapsed: {elapsed_time:.2f}s")
+        print(f"Keywords found: {found}")
+        print(f"Total findings: {len(findings)}")
+        
+        return CrawlReport(
+            site=home_url,
+            found=found,
+            findings=findings,
+            pages_scanned=pages_scanned,
+            max_depth_reached=max_depth_reached,
+            time_elapsed=elapsed_time,
+        )
 
     def save_results_to_csv(self, report: CrawlReport, csv_path: str) -> None:
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
