@@ -1,0 +1,256 @@
+/**
+ * Cute Fluffy SpiderEye Component Styles
+ * 
+ * Dark cybersecurity theme with adorable fluffy spider
+ */
+
+:root {
+  --spider-thread: 0 0% 40%;
+  --spider-body: 0 0% 20%;
+  --spider-body-highlight: 0 0% 35%;
+  --spider-fur: 0 0% 15%;
+  --spider-shadow: 0 0% 0%;
+  --spider-leg: 0 0% 30%;
+  --spider-eye-bg: 0 0% 95%;
+  --spider-iris: 0 0% 10%;
+  --spider-eye-shine: 0 0% 100%;
+}
+
+/* ============================================
+   SPIDER CONTAINER - Positioning
+   ============================================ */
+
+.spider-container {
+  position: absolute;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.spider-container.spider-center {
+  top: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.spider-container.spider-left {
+  top: 0px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* ============================================
+   WRAPPER & CONTAINER
+   ============================================ */
+
+.spider-eye-wrapper {
+  --eye-size: 120px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  animation: smooth-hang 4s ease-in-out infinite;
+}
+
+/* Hanging thread */
+.spider-thread {
+  width: 2px;
+  height: 120px;
+  background: linear-gradient(
+    180deg,
+    hsl(var(--spider-thread)) 0%,
+    hsl(var(--spider-thread) / 0.8) 100%
+  );
+  margin-bottom: px;
+}
+
+/* ============================================
+   SPIDER BODY - Fluffy Style
+   ============================================ */
+
+.cute-spider {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.spider-body {
+  position: relative;
+  width: var(--eye-size);
+  height: var(--eye-size);
+  background: radial-gradient(
+    ellipse at 30% 30%,
+    hsl(var(--spider-body-highlight)) 0%,
+    hsl(var(--spider-body)) 50%,
+    hsl(var(--spider-body)) 100%
+  );
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 
+    0 10px 30px hsl(var(--spider-shadow) / 0.5),
+    0 5px 15px hsl(var(--spider-shadow) / 0.3);
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Fluffy fur texture overlay */
+.spider-body::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  background: 
+    radial-gradient(ellipse at 20% 20%, hsl(var(--spider-fur) / 0.6) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 30%, hsl(var(--spider-fur) / 0.4) 0%, transparent 40%),
+    radial-gradient(ellipse at 30% 80%, hsl(var(--spider-fur) / 0.5) 0%, transparent 45%),
+    radial-gradient(ellipse at 70% 70%, hsl(var(--spider-fur) / 0.4) 0%, transparent 40%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Fuzzy edge effect */
+.spider-body::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 50% 50%,
+    transparent 45%,
+    hsl(var(--spider-body) / 0.3) 48%,
+    hsl(var(--spider-body) / 0.6) 52%,
+    transparent 55%
+  );
+  filter: blur(3px);
+  pointer-events: none;
+}
+
+.spider-body:hover {
+  transform: scale(1.03);
+}
+
+.spider-body.submitting {
+  animation: happy-bounce 0.5s ease-out;
+}
+
+.spider-body.sway {
+  animation: gentle-sway 0.6s ease-in-out;
+}
+
+@keyframes happy-bounce {
+  0%, 100% { transform: translateY(0) scale(1); }
+  25% { transform: translateY(-10px) scale(1.05); }
+  50% { transform: translateY(-5px) scale(1.02); }
+  75% { transform: translateY(-8px) scale(1.04); }
+}
+
+@keyframes gentle-sway {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-3deg); }
+  75% { transform: rotate(3deg); }
+}
+
+@keyframes smooth-hang {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(8px); }
+}
+
+/* ============================================
+   EYES
+   ============================================ */
+
+.spider-eyes {
+  position: relative;
+  display: flex;
+  gap: calc(var(--eye-size) * 0.08);
+  z-index: 10;
+  margin-top: calc(var(--eye-size) * -0.05);
+}
+
+.cute-eye {
+  position: relative;
+  width: calc(var(--eye-size) * 0.38);
+  height: calc(var(--eye-size) * 0.42);
+  background: hsl(var(--spider-eye-bg));
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 
+    inset 0 2px 6px hsl(var(--spider-shadow) / 0.1),
+    0 2px 8px hsl(var(--spider-shadow) / 0.3);
+  overflow: hidden;
+  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.cute-eye.closed {
+  animation: eye-close-cute 0.3s ease-out forwards;
+}
+
+.cute-eye:not(.closed) {
+  animation: eye-open-cute 0.3s ease-out forwards;
+}
+
+@keyframes eye-close-cute {
+  0% { 
+    height: calc(var(--eye-size) * 0.42);
+    border-radius: 50%;
+  }
+  100% { 
+    height: calc(var(--eye-size) * 0.05);
+    border-radius: 20px;
+  }
+}
+
+@keyframes eye-open-cute {
+  0% { 
+    height: calc(var(--eye-size) * 0.05);
+    border-radius: 20px;
+  }
+  100% { 
+    height: calc(var(--eye-size) * 0.42);
+    border-radius: 50%;
+  }
+}
+
+/* Iris - Large black pupil style like reference */
+.cute-iris {
+  position: relative;
+  width: 75%;
+  height: 75%;
+  background: hsl(var(--spider-iris));
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center;
+}
+
+/* Eye shine/highlight */
+.eye-shine {
+  position: absolute;
+  top: 18%;
+  left: 22%;
+  width: 28%;
+  height: 28%;
+  background: hsl(var(--spider-eye-shine));
+  border-radius: 50%;
+  opacity: 0.95;
+}
+
+.eye-shine-small {
+  position: absolute;
+  bottom: 30%;
+  right: 22%;
+  width: 12%;
+  height: 12%;
+  background: hsl(var(--spider-eye-shine));
+  border-radius: 50%;
+  opacity: 0.7;
+}
+
+/* ============================================
+   END - NO LEG COMPONENTS USED
+   ============================================ */
