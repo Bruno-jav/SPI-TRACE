@@ -12,6 +12,11 @@ from bs4 import BeautifulSoup
 from flask_cors import CORS
 
 from polite_scraper import PoliteScraper
+from connectivity_manager import (
+    TorConnectionManager,
+    verify_tor_connectivity,
+    continuous_scanning_controller_loop,
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -291,6 +296,42 @@ def normalize_scan_urls(payload_urls):
     return normalized
 
 
+def normalize_tor_sources(payload_sources):
+    """Normalize Tor scan sources into connectivity_manager-compatible structures."""
+    if not isinstance(payload_sources, list):
+        return None
+
+    normalized = []
+    for entry in payload_sources:
+        if isinstance(entry, str):
+            source = entry.strip()
+            if source:
+                normalized.append({"source": source, "alternatives": []})
+            continue
+
+        if not isinstance(entry, dict):
+            continue
+
+        # Accept both {source: ...} and {url: ...} payload styles.
+        source = (entry.get("source") or entry.get("url") or "").strip()
+        if not source:
+            continue
+
+        alternatives = entry.get("alternatives") or []
+        if not isinstance(alternatives, list):
+            alternatives = []
+
+        clean_alternatives = []
+        for candidate in alternatives:
+            text = str(candidate).strip()
+            if text:
+                clean_alternatives.append(text)
+
+        normalized.append({"source": source, "alternatives": clean_alternatives})
+
+    return normalized
+
+
 def run_scan(
     scan_id,
     keywords,
@@ -368,6 +409,75 @@ def run_scan(
     logging.info(
         "scan %s finished: %s match(es), %s error(s)",
         scan_id,
+        len(matches),
+        len(errors),
+    )
+
+
+def run_tor_scan(scan_id, keywords, sources):
+    """Run resilient Tor-based dark web scan in the background."""
+    logging.info("tor scan %s started with %s source(s)", scan_id, len(sources))
+
+    tor_password = os.getenv("TOR_CONTROL_PASSWORD")
+    manager = TorConnectionManager(control_password=tor_password)
+
+    with SCANS_LOCK:
+        SCANS[scan_id]["progress"] = {
+            "current": 0,
+            "total": len(sources),
+            "url": None,
+        }
+
+    if not verify_tor_connectivity(manager):
+        with SCANS_LOCK:
+            SCANS[scan_id]["status"] = "failed"
+            SCANS[scan_id]["errors"] = [
+                {
+                    "source": None,
+                    "error": "Tor connectivity check failed. Ensure Tor SOCKS5 (9050) and control port (9051) are available.",
+                }
+            ]
+            SCANS[scan_id]["completedAt"] = datetime.utcnow().isoformat()
+        logging.error("tor scan %s aborted: tor connectivity failed", scan_id)
+        return
+
+    results = continuous_scanning_controller_loop(
+        sources=sources,
+        keywords=keywords,
+        tor_manager=manager,
+        retries_per_source=3,
+    )
+
+    matches = []
+    errors = []
+    for item in results:
+        source = item.get("source")
+        status = item.get("status")
+        found_matches = item.get("matches") or []
+
+        if status == "breach":
+            for token in found_matches:
+                matches.append({"keyword": token, "url": source})
+
+        if status in {"unreachable", "error"}:
+            errors.append({"source": source, "error": status})
+
+    with SCANS_LOCK:
+        SCANS[scan_id]["status"] = "complete"
+        SCANS[scan_id]["matches"] = matches
+        SCANS[scan_id]["errors"] = errors
+        SCANS[scan_id]["tor_results"] = results
+        SCANS[scan_id]["progress"] = {
+            "current": len(sources),
+            "total": len(sources),
+            "url": None,
+        }
+        SCANS[scan_id]["completedAt"] = datetime.utcnow().isoformat()
+
+    logging.info(
+        "tor scan %s finished: %s source result(s), %s breach match(es), %s error(s)",
+        scan_id,
+        len(results),
         len(matches),
         len(errors),
     )
@@ -459,6 +569,67 @@ def scan_status(scan_id):
     if not scan:
         return jsonify({"error": "scan not found"}), 404
     return jsonify(scan)
+
+
+@app.route("/scan/tor", methods=["POST"])
+def scan_tor():
+    """
+    Start Tor-based dark web scanning with retries, circuit rotation, and failover.
+
+    Expected payload examples:
+    {
+      "keywords": "breach,email,password",
+      "sources": [
+        {
+          "source": "http://primarysource.onion",
+          "alternatives": ["http://backupsource.onion"]
+        }
+      ]
+    }
+    """
+    data = request.json or {}
+
+    raw_keywords = data.get("keywords", "")
+    if isinstance(raw_keywords, list):
+        keywords = [str(k).strip() for k in raw_keywords if str(k).strip()]
+    else:
+        keywords = [k.strip() for k in str(raw_keywords).split(",") if k.strip()]
+
+    if not keywords:
+        return jsonify({"error": "keywords are required"}), 400
+
+    sources_payload = data.get("sources")
+    if sources_payload is None:
+        sources_payload = data.get("urls")
+
+    sources_to_scan = normalize_tor_sources(sources_payload)
+    if not sources_to_scan:
+        enabled = get_enabled_urls()
+        sources_to_scan = [{"source": u.get("url"), "alternatives": []} for u in enabled if u.get("url")]
+
+    if not sources_to_scan:
+        return jsonify({"error": "no valid sources to scan"}), 400
+
+    scan_id = uuid.uuid4().hex
+    with SCANS_LOCK:
+        SCANS[scan_id] = {
+            "status": "scanning",
+            "mode": "tor",
+            "matches": [],
+            "errors": [],
+            "progress": {"current": 0, "total": len(sources_to_scan), "url": None},
+            "startedAt": datetime.utcnow().isoformat(),
+        }
+
+    worker = threading.Thread(
+        target=run_tor_scan,
+        args=(scan_id, keywords, sources_to_scan),
+        daemon=True,
+    )
+    worker.start()
+
+    logging.info("tor scan %s queued", scan_id)
+    return jsonify({"status": "scanning", "scan_id": scan_id, "mode": "tor"})
 
 
 @app.route("/api/urls", methods=["GET"])
